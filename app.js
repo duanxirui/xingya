@@ -111,7 +111,7 @@
   }
 
   function loadState() {
-    const fallback = { name: '小星', grade: 2, semester: 1, semestersByGrade: {}, previewDone: [], reviewDone: [], tests: [], mistakes: {}, activities: [], stars: 0, starsByGrade: { 1: 0, 2: 0 }, starsBySemester: {} };
+    const fallback = { name: '小星', grade: 2, semester: 1, semestersByGrade: {}, previewDone: [], reviewDone: [], tests: [], mistakes: {}, questionStats: {}, focusDone: [], activities: [], stars: 0, starsByGrade: { 1: 0, 2: 0 }, starsBySemester: {} };
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
       const historicalStars = Number.isFinite(saved.stars) ? saved.stars : 0;
@@ -132,6 +132,10 @@
         reviewDone: Array.isArray(saved.reviewDone) ? saved.reviewDone : [],
         tests: Array.isArray(saved.tests) ? saved.tests : [],
         mistakes: saved.mistakes && typeof saved.mistakes === 'object' && !Array.isArray(saved.mistakes) ? saved.mistakes : {},
+        // 记录历次答题表现；旧版错题仍保留在 mistakes 中，首次再次作答时补入统计。
+        questionStats: saved.questionStats && typeof saved.questionStats === 'object' && !Array.isArray(saved.questionStats) ? saved.questionStats : {},
+        // 掌握标记采用课程 ID 和知识点序号，跨年级/学期互不干扰。
+        focusDone: Array.isArray(saved.focusDone) ? [...new Set(saved.focusDone.filter(id => typeof id === 'string'))] : [],
         activities: Array.isArray(saved.activities) ? saved.activities : [],
         stars: historicalStars,
         starsByGrade: savedStars,
@@ -174,6 +178,7 @@
     page: 'dashboard', subject: 'all', search: '', detail: null, step: 0,
     reveal: false, flipped: new Set(), showingBack: new Set(), quiz: null, result: null,
     mistakeExpanded: new Set(), profileOpen: false, reminderOpen: false, gradeOpen: false,
+    focus: { subject: 'all', unit: 'all', query: '', lessonId: null, limit: 18, practiceAnswer: false, reviewAnswers: false },
     catalog: { grade: state.grade, semester: state.semester, subject: 'all', lessonId: null, query: '', answersVisible: false },
     menuOpen: false, toast: '', toastTimer: null
   };
@@ -298,6 +303,15 @@
   }
 
   function nav(page) {
+    if (page === 'focus' && ui.page !== 'focus') {
+      ui.focus.lessonId = null;
+      ui.focus.subject = 'all';
+      ui.focus.unit = 'all';
+      ui.focus.query = '';
+      ui.focus.limit = 18;
+      ui.focus.practiceAnswer = false;
+      ui.focus.reviewAnswers = false;
+    }
     if (page === 'catalog' && ui.page !== 'catalog') {
       ui.catalog.grade = state.grade;
       ui.catalog.semester = state.semester;
@@ -497,6 +511,13 @@
     } else if (kind === 'mistakes') {
       pool = pool.filter(q => state.mistakes[q.id]);
       label = '错题巩固练习';
+      if (id.includes('::')) {
+        const separator = id.indexOf('::');
+        const subjectId = id.slice(0, separator);
+        const unit = id.slice(separator + 2);
+        pool = pool.filter(q => q.subject === subjectId && q.unit === unit);
+        label = `${SUBJECT_MAP[subjectId]?.name || '学科'} · ${unit} · 错题专项练习`;
+      }
     } else if (kind === 'mixed') {
       pool = pool.filter(q => subjectRole(q.subject, state.grade) === 'main');
     }
@@ -547,11 +568,23 @@
       questionIds: quiz.questions.map(question => question.id)
     };
     quiz.answers.forEach(answer => {
+      const previous = state.mistakes[answer.id];
+      const oldStats = state.questionStats[answer.id];
+      const oldWrong = Math.max(0, Number(typeof previous === 'number' ? previous : previous?.count) || 0);
+      // 旧版只保留尚未订正的错误次数；升级后首次作答时将这部分历史补入。
+      const stats = oldStats && typeof oldStats === 'object' ? oldStats :
+        { attempts: oldWrong, wrong: oldWrong, correct: 0, lastWrongAt: previous?.at || null };
+      state.questionStats[answer.id] = {
+        attempts: (Number(stats.attempts) || 0) + 1,
+        wrong: (Number(stats.wrong) || 0) + Number(!answer.correct),
+        correct: (Number(stats.correct) || 0) + Number(answer.correct),
+        lastWrongAt: answer.correct ? (stats.lastWrongAt || null) : attempt.at,
+        lastCorrectAt: answer.correct ? attempt.at : (stats.lastCorrectAt || null)
+      };
       if (answer.correct) delete state.mistakes[answer.id];
       else {
-        const previous = state.mistakes[answer.id] || { count: 0 };
         state.mistakes[answer.id] = {
-          count: previous.count + 1,
+          count: oldWrong + 1,
           selected: answer.selected,
           at: attempt.at
         };
@@ -608,7 +641,7 @@
   }
 
   function pageTitle() {
-    return ({ dashboard: '学习总览', catalog: '课程目录', preview: '课前预习', review: '课后复习', quiz: '测试与考试', mistakes: '错题本', report: '学习报告' })[ui.page];
+    return ({ dashboard: '学习总览', catalog: '课程目录', focus: '课程划重点', preview: '课前预习', review: '课后复习', quiz: '测试与考试', mistakes: '错题分析', report: '学习报告' })[ui.page];
   }
 
   function render() {
@@ -627,13 +660,14 @@
           <nav aria-label="主导航">
             ${navItem('dashboard', 'home', '学习总览')}
             ${navItem('catalog', 'book', '课程目录')}
+            ${navItem('focus', 'target', '课程划重点')}
             ${navItem('preview', 'book', '课前预习')}
             ${navItem('review', 'layers', '课后复习')}
             ${navItem('quiz', 'quiz', '测试与考试')}
           </nav>
           <div class="nav-caption nav-caption-second">成长记录</div>
           <nav aria-label="学习记录">
-            ${navItem('mistakes', 'mistakes', '我的错题本')}
+            ${navItem('mistakes', 'mistakes', '错题分析')}
             ${navItem('report', 'chart', '学习报告')}
           </nav>
           <div class="sidebar-bottom">
@@ -652,7 +686,7 @@
               <div><div class="top-eyebrow">${escapeHtml(dateLabel(new Date()))} <span class="day-dot">●</span> 元气满满的一天</div><div class="top-location">${pageTitle()}</div></div>
             </div>
             <div class="topbar-tools">
-              <label class="search-box">${icon('search', 18)}<input aria-label="搜索课程" data-search placeholder="搜索你想学的课程..." value="${escapeHtml(ui.page === 'catalog' ? ui.catalog.query : ui.search)}" /><span class="search-shortcut">↵</span></label>
+              <label class="search-box">${icon('search', 18)}<input aria-label="搜索课程" data-search placeholder="搜索你想学的课程..." value="${escapeHtml(ui.page === 'catalog' ? ui.catalog.query : ui.page === 'focus' ? ui.focus.query : ui.search)}" /><span class="search-shortcut">↵</span></label>
               <button class="top-grade-picker" data-action="grade-picker" aria-label="当前${gradeName(state.grade)}${semesterName(state.semester)}，点击切换年级或学期">${icon('book', 16)} ${gradeName(state.grade)} · ${semesterName(state.semester)} ${icon('chevronDown', 14)}</button>
               <button class="icon-button notification-button" data-action="reminders" aria-label="学习提醒">${icon('bell', 20)}${totalToday < 3 ? '<span class="notify-dot"></span>' : ''}</button>
               <button class="profile-button" data-action="profile"><span class="avatar">${escapeHtml(state.name.charAt(0))}</span><span class="profile-label"><strong>${escapeHtml(state.name)}同学</strong><small>快乐学习中 ${icon('chevronDown', 12)}</small></span></button>
@@ -674,6 +708,7 @@
     if (ui.detail) return renderLessonDetail();
     if (ui.page === 'dashboard') return renderDashboard();
     if (ui.page === 'catalog') return renderCatalog();
+    if (ui.page === 'focus') return renderFocus();
     if (ui.page === 'preview' || ui.page === 'review') return renderLessonList(ui.page);
     if (ui.page === 'quiz') return renderQuizHub();
     if (ui.page === 'mistakes') return renderMistakes();
@@ -965,6 +1000,198 @@
     </div>`;
   }
 
+  function focusPointKey(lesson, index) {
+    return `${lesson.id}::${index}`;
+  }
+
+  function focusLesson(id) {
+    return currentLessons().find(lesson => lesson.id === id && lesson.textbook !== false) || null;
+  }
+
+  function focusProgress(lesson) {
+    const total = lesson.concepts.length;
+    const done = lesson.concepts.reduce((sum, _, index) =>
+      sum + Number(state.focusDone.includes(focusPointKey(lesson, index))), 0);
+    return { done, total, percent: total ? Math.round(done / total * 100) : 0 };
+  }
+
+  function focusListedLessons() {
+    const filter = ui.focus;
+    const query = filter.query.trim().toLocaleLowerCase();
+    return currentLessons().filter(lesson => lesson.textbook !== false &&
+      (filter.subject === 'all' || lesson.subject === filter.subject) &&
+      (filter.unit === 'all' || lesson.unit === filter.unit) &&
+      (!query || [lesson.title, lesson.unit, lesson.description,
+        SUBJECT_MAP[lesson.subject]?.name, ...lesson.goals,
+        ...lesson.concepts.flatMap(concept => [concept.title, concept.text])]
+        .join(' ').toLocaleLowerCase().includes(query)));
+  }
+
+  function openFocusLesson(id, fromCourse = false) {
+    const lesson = focusLesson(id);
+    if (!lesson) return;
+    if (fromCourse) {
+      ui.focus.subject = lesson.subject;
+      ui.focus.unit = lesson.unit;
+      ui.focus.query = '';
+      ui.focus.limit = 18;
+    }
+    ui.focus.lessonId = id;
+    ui.focus.practiceAnswer = false;
+    ui.focus.reviewAnswers = false;
+    ui.page = 'focus';
+    ui.detail = null;
+    ui.quiz = null;
+    ui.result = null;
+    ui.menuOpen = false;
+    render();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function renderFocus() {
+    const lessons = currentLessons().filter(lesson => lesson.textbook !== false);
+    const selected = focusLesson(ui.focus.lessonId);
+    if (selected) return renderFocusDetail(selected);
+    if (ui.focus.lessonId) ui.focus.lessonId = null;
+
+    const filters = ui.focus;
+    const bySubject = lessons.filter(lesson => filters.subject === 'all' || lesson.subject === filters.subject);
+    const units = [...new Set(bySubject.map(lesson => lesson.unit))];
+    if (filters.unit !== 'all' && !units.includes(filters.unit)) filters.unit = 'all';
+    const matching = focusListedLessons();
+    const visible = matching.slice(0, filters.limit);
+    const groups = new Map();
+    visible.forEach(lesson => {
+      const key = `${lesson.subject}::${lesson.unit}`;
+      if (!groups.has(key)) groups.set(key, { subject: SUBJECT_MAP[lesson.subject], unit: lesson.unit, lessons: [] });
+      groups.get(key).lessons.push(lesson);
+    });
+    const total = lessons.reduce((sum, lesson) => sum + lesson.concepts.length, 0);
+    const done = lessons.reduce((sum, lesson) => sum + focusProgress(lesson).done, 0);
+
+    return `<div class="focus-page fade-in">
+      <div class="page-heading"><div><span class="page-kicker">${escapeHtml(gradeName(state.grade))} · ${escapeHtml(semesterName(state.semester))} · 重点归纳</span>
+        <h1>课程划重点<span class="heading-dot">.</span></h1>
+        <p>按学科和单元找重点，结合例子理解知识，再检查是否已经掌握。</p></div><div class="heading-sticker">🎯</div></div>
+      <div class="focus-overview">
+        <div><span>📚 本学期课程</span><strong>${lessons.length}<small> 课</small></strong></div>
+        <div><span>✨ 重点知识</span><strong>${total}<small> 项</small></strong></div>
+        <div><span>✅ 已标记掌握</span><strong>${done}<small> / ${total} 项</small></strong></div>
+        <div class="focus-overview-progress"><span>重点掌握进度</span><strong>${total ? Math.round(done / total * 100) : 0}%</strong>
+          <div class="track"><span style="width:${total ? done / total * 100 : 0}%"></span></div></div>
+      </div>
+      <section class="focus-filters panel" aria-label="筛选重点课程">
+        <div class="focus-filter-heading"><h2>选择学科和单元</h2><p>显示当前开放年级与学期的教材学习主题</p></div>
+        <div class="focus-filter-row" role="group" aria-label="学科">
+          <button type="button" class="focus-chip ${filters.subject === 'all' ? 'selected' : ''}" data-action="focus-subject" data-subject="all">全部学科</button>
+          ${currentSubjects().map(subject => `<button type="button" class="focus-chip ${filters.subject === subject.id ? 'selected' : ''}" data-action="focus-subject" data-subject="${subject.id}">${subject.emoji} ${escapeHtml(subject.name)}</button>`).join('')}
+        </div>
+        <div class="focus-unit-label">按单元查看</div>
+        <div class="focus-filter-row focus-units" role="group" aria-label="单元">
+          <button type="button" class="focus-chip ${filters.unit === 'all' ? 'selected' : ''}" data-action="focus-unit" data-unit="all">全部单元</button>
+          ${units.map(unit => `<button type="button" class="focus-chip ${filters.unit === unit ? 'selected' : ''}" data-action="focus-unit" data-unit="${escapeHtml(unit)}">${escapeHtml(unit)}</button>`).join('')}
+        </div>
+        <div class="focus-search"><label>${icon('search', 17)}<input data-focus-search aria-label="搜索课程重点" placeholder="搜索课名、知识点或学习方法" value="${escapeHtml(filters.query)}"></label>
+          <button type="button" data-action="focus-search">搜索</button>
+          ${filters.query ? '<button type="button" class="focus-clear" data-action="focus-clear">清除</button>' : ''}</div>
+      </section>
+      <div class="focus-results-heading"><div><h2>📌 本学期重点清单</h2><p>找到 ${matching.length} 课 · 显示 ${visible.length} 课</p></div>
+        <span>完成标记仅表示自我检查，建议结合课本再次核对</span></div>
+      ${visible.length ? [...groups.values()].map(group => `<section class="focus-unit-section">
+        <h3>${group.subject?.emoji || '📚'} ${escapeHtml(group.subject?.name || '学科')} · ${escapeHtml(group.unit)}</h3>
+        <div class="focus-lesson-grid">${group.lessons.map(lesson => {
+          const progress = focusProgress(lesson);
+          const subject = SUBJECT_MAP[lesson.subject];
+          return `<article class="focus-lesson-card tone-${subject.tone}">
+            <div class="focus-card-top"><span>${lesson.emoji} ${escapeHtml(subject.name)}</span><small>${progress.done}/${progress.total} 项已掌握</small></div>
+            <h4>${escapeHtml(lesson.title)}</h4><p>${escapeHtml(lesson.goals[0] || lesson.description)}</p>
+            <div class="focus-card-track"><div class="track"><span style="width:${progress.percent}%"></span></div><span>${progress.percent}%</span></div>
+            <button type="button" class="focus-card-open" data-action="focus-open" data-lesson="${escapeHtml(lesson.id)}">查看本课重点 ${icon('arrow', 16)}</button>
+          </article>`;
+        }).join('')}</div></section>`).join('') : `<div class="empty-state"><span>🔎</span><h3>没有找到对应的重点课程</h3><p>更换学科、单元或关键词试试看。</p><button type="button" class="outline-button" data-action="focus-reset">查看全部重点</button></div>`}
+      ${visible.length < matching.length ? `<button type="button" class="focus-more outline-button" data-action="focus-more">查看更多课程（还有 ${matching.length - visible.length} 课） ${icon('chevronDown', 16)}</button>` : ''}
+      <p class="focus-source-note">本页按照平台已录入的统编语文、人教数学教材目录整理，重点、例子和练习来自平台原创导学，不是出版社官方划重点或课本原文；具体要求请以学校教材和老师教学进度为准。</p>
+    </div>`;
+  }
+
+  function renderFocusDetail(lesson) {
+    const subject = SUBJECT_MAP[lesson.subject];
+    const progress = focusProgress(lesson);
+    const hasQuiz = QUESTION_BANK.some(question => question.grade === state.grade &&
+      question.semester === state.semester && question.lessonId === lesson.id);
+    const mistakes = Object.entries(state.mistakes).map(([id, record]) => ({
+      question: QUESTION_MAP[id], count: Number(record?.count || record) || 1
+    })).filter(item => item.question && item.question.grade === state.grade &&
+      item.question.semester === state.semester && item.question.subject === lesson.subject &&
+      (item.question.lessonId === lesson.id ||
+        (!item.question.lessonId && item.question.unit === lesson.unit)))
+      .sort((a, b) => b.count - a.count).slice(0, 2);
+    const advice = lesson.subject === 'math'
+      ? '先看清题目条件和数量关系，写出计算过程，再对照例题检查结果。'
+      : lesson.subject === 'chinese'
+        ? '结合教材正文和插图理解词句，先说出理由，再核对课文细节。'
+        : '先读懂句子和语境，分清词义与表达顺序，再对照课本。';
+    return `<div class="focus-page focus-detail fade-in">
+      <div class="breadcrumb"><button type="button" data-action="focus-back">${icon('left', 16)} 返回重点清单</button>
+        <span>/</span><span>${escapeHtml(subject.name)}</span><span>/</span><strong>${escapeHtml(lesson.title)}</strong></div>
+      <div class="focus-detail-hero tone-${subject.tone}">
+        <div><span class="page-kicker">${escapeHtml(gradeName(state.grade))} · ${escapeHtml(semesterName(state.semester))} · ${escapeHtml(lesson.unit)}</span>
+          <h1>${lesson.emoji} ${escapeHtml(lesson.title)}</h1>
+          <p>${escapeHtml(lesson.description)}</p>
+          <div class="focus-detail-progress"><span>本课已掌握 ${progress.done} / ${progress.total} 项</span><strong>${progress.percent}%</strong>
+            <div class="track"><span style="width:${progress.percent}%"></span></div></div>
+        </div><span class="focus-hero-sticker">🎯</span>
+      </div>
+      <section class="focus-detail-section panel">
+        <div class="focus-section-heading"><h2>📍 本课必会知识与方法</h2><p>读懂关键知识和例子后，可以逐项标记“我已掌握”。</p></div>
+        <div class="focus-point-list">${lesson.concepts.map((concept, index) => {
+          const marked = state.focusDone.includes(focusPointKey(lesson, index));
+          const method = /方法|策略|习惯/.test(concept.title);
+          return `<article class="focus-point ${marked ? 'is-mastered' : ''}">
+            <div class="focus-point-head"><span class="focus-point-num">${String(index + 1).padStart(2, '0')}</span>
+              <div><span class="focus-point-kind">${method ? '学习方法' : '核心重点'}</span><h3>${escapeHtml(concept.title)}</h3></div>
+              <button type="button" class="focus-master-button ${marked ? 'is-mastered' : ''}" data-action="focus-mark"
+                data-lesson="${escapeHtml(lesson.id)}" data-point="${index}" aria-pressed="${marked}">${marked ? icon('circleCheck', 16) + ' 已掌握' : icon('check', 16) + ' 标记掌握'}</button></div>
+            <p>${escapeHtml(concept.text)}</p>
+            ${concept.example ? `<div class="focus-point-example"><strong>🌟 重点例子</strong><p>${escapeHtml(concept.example)}</p></div>` : ''}
+          </article>`;
+        }).join('')}</div>
+      </section>
+      <div class="focus-detail-columns">
+        <section class="focus-detail-section panel"><div class="focus-section-heading"><h2>🧩 易错自查与提醒</h2>
+          <p>结合本课及对应单元的已有错题，检查薄弱环节。</p></div>
+          ${mistakes.length ? `<div class="focus-personal-errors">${mistakes.map(item =>
+            `<div class="focus-personal-error"><strong>🔁 曾错 ${item.count} 次 · ${escapeHtml(item.question.prompt)}</strong>
+              <p>${escapeHtml(item.question.explanation || '请对照相关知识点和教材例题订正。')}</p></div>`).join('')}</div>`
+            : '<p class="focus-no-errors">目前没有本课或本单元待订正的错题。</p>'}
+          <div class="focus-study-tip"><strong>💡 学习提醒</strong><p>${escapeHtml(advice)}</p></div>
+        </section>
+        <section class="focus-detail-section panel"><div class="focus-section-heading"><h2>✏️ 重点巩固练习</h2>
+          <p>先自己回答，再打开参考思路。</p></div>
+          <div class="focus-practice-question">${escapeHtml(lesson.practice)}</div>
+          <button type="button" class="focus-answer-toggle" data-action="focus-practice-answer"
+            aria-expanded="${ui.focus.practiceAnswer}">${ui.focus.practiceAnswer ? '隐藏参考思路' : '查看参考思路'} ${icon('chevronDown', 16)}</button>
+          ${ui.focus.practiceAnswer ? `<div class="focus-practice-answer"><strong>参考思路</strong><p>${escapeHtml(lesson.practiceAnswer)}</p></div>` : ''}
+        </section>
+      </div>
+      <section class="focus-detail-section panel"><div class="focus-section-heading focus-review-heading">
+        <div><h2>🧠 考前快速回顾</h2><p>先试着口头回答这些问题，再检查答案。</p></div>
+        <button type="button" class="focus-answer-toggle" data-action="focus-review-answer" aria-expanded="${ui.focus.reviewAnswers}">${ui.focus.reviewAnswers ? '隐藏答案' : '显示答案'}</button>
+      </div>
+      <div class="focus-review-grid">${lesson.review.map(([question, answer], index) =>
+        `<div class="focus-review-card"><span>回顾 ${index + 1}</span><strong>${escapeHtml(question)}</strong>
+          ${ui.focus.reviewAnswers ? `<p>${escapeHtml(answer)}</p>` : '<small>先独立想一想</small>'}</div>`).join('')}</div>
+      </section>
+      <div class="focus-detail-actions">
+        <button type="button" class="outline-button" data-action="focus-back">${icon('left', 17)} 返回重点清单</button>
+        <button type="button" class="outline-button" data-action="focus-preview" data-lesson="${escapeHtml(lesson.id)}">去课前预习</button>
+        <button type="button" class="outline-button" data-action="focus-review" data-lesson="${escapeHtml(lesson.id)}">去课后复习</button>
+        ${hasQuiz ? `<button type="button" class="button primary-button" data-action="focus-quiz" data-lesson="${escapeHtml(lesson.id)}">做本课小测 ${icon('arrow', 16)}</button>` : ''}
+      </div>
+      <p class="focus-source-note">重点、例子和巩固题均来自本平台原创导学，并非官方教材原文或官方教学重点，请结合学校使用的课本核对。</p>
+    </div>`;
+  }
+
   function renderLessonGroup(lessons, role, completed, mode) {
     if (!lessons.length) return '';
     return `<section class="curriculum-group" aria-label="教材课程">
@@ -1007,6 +1234,7 @@
       <div class="lesson-content-layout"><div class="lesson-content-main">${preview ? renderPreviewContent(lesson, done) : renderReviewContent(lesson, done)}</div>
         <aside class="lesson-right">
           <div class="panel lesson-goal-panel"><div class="panel-title"><div class="panel-title-icon">${icon('target', 19)}</div><h3>本课学习目标</h3></div><div class="goal-list">${lesson.goals.map((g, i) => `<div><span>${icon('check', 15)}</span><p>${escapeHtml(g)}</p></div>`).join('')}</div></div>
+          <button class="outline-button wide" data-action="open-focus" data-lesson="${escapeHtml(lesson.id)}">${icon('target', 17)} 本课划重点</button>
           <div class="lesson-side-tip"><div>🌟</div><strong>${preview ? '预习小提示' : '复习小提示'}</strong><p>${preview ? '先自己想一想，遇到不明白的地方可以在课堂上向老师提问。' : '翻开答案前，先认真回想一遍。能自己说出来，就真的学会啦！'}</p></div>
           <button class="outline-button wide" data-action="speak" data-lesson="${lesson.id}">${icon('volume', 17)} ${lesson.subject === 'english' ? '朗读英语重点' : '朗读本课知识'}</button>
         </aside></div>
@@ -1139,7 +1367,7 @@
     const result = ui.result;
     const excellent = result.score >= 80;
     return `<div class="quiz-result fade-in"><div class="result-celebration"><span class="confetti confetti-a">✦</span><span class="confetti confetti-b">✳</span><span class="confetti confetti-c">✧</span><div class="result-trophy">${excellent ? '🏆' : '🌈'}</div><span class="page-kicker">${isExam(result.kind) ? 'EXAM COMPLETED · 阶段测试已交卷' : 'CHALLENGE COMPLETED'}</span><h1>${isExam(result.kind) ? escapeHtml(result.label) + ' · 成绩单' : excellent ? '哇！你是知识小达人！' : '闯关完成，进步看得见！'}</h1><p>${excellent ? '认真练习取得好成绩，继续保持！' : '每一道错题都是一次学习机会，继续加油！'}</p><div class="result-score"><strong>${result.score}</strong><span>分</span></div><div class="result-summary"><span>${icon('circleCheck', 18)} 答对 ${result.correct} / ${result.total} 题</span><span>${icon('star', 18)} 收获 ${result.correct * 2} 颗星星</span></div>
-        <div class="result-buttons"><button class="outline-button" data-nav="quiz">返回挑战中心</button><button class="button primary-button" data-action="retry-quiz" data-kind="${result.kind}" data-id="${escapeHtml(result.sourceId)}">再挑战一次 ${icon('rotate', 17)}</button></div></div>
+        <div class="result-buttons"><button class="outline-button" data-nav="quiz">返回挑战中心</button><button class="outline-button" data-nav="mistakes">查看错题分析</button><button class="button primary-button" data-action="retry-quiz" data-kind="${result.kind}" data-id="${escapeHtml(result.sourceId)}">再挑战一次 ${icon('rotate', 17)}</button></div></div>
       ${renderExamBreakdown(result)}
       <div class="result-review">${sectionHeader('题目回顾', '看看哪些知识已经掌握，哪些还可以再练一练')}
         ${result.answers.map((answer, i) => {
@@ -1149,17 +1377,106 @@
       </div></div>`;
   }
 
+  function currentMistakeEntries(subject = 'all') {
+    return Object.entries(state.mistakes)
+      .filter(([id]) => {
+        const q = QUESTION_MAP[id];
+        return q && q.grade === state.grade && q.semester === state.semester &&
+          (subject === 'all' || q.subject === subject);
+      })
+      .map(([id, record]) => [id, record && typeof record === 'object' ? record : { count: Number(record) || 1 }]);
+  }
+
+  function renderMistakeAnalysis(entries) {
+    const history = Object.entries(state.questionStats).filter(([id, stats]) => {
+      const q = QUESTION_MAP[id];
+      return stats && typeof stats === 'object' && q && q.grade === state.grade && q.semester === state.semester &&
+        (ui.subject === 'all' || q.subject === ui.subject);
+    });
+    const repeated = entries.filter(([id, record]) =>
+      Math.max(Number(record.count) || 0, Number(state.questionStats[id]?.wrong) || 0) >= 2).length;
+    const mastered = history.filter(([id, stats]) => Number(stats.wrong) > 0 && !state.mistakes[id]).length;
+    const wrongTotal = history.reduce((sum, [, stats]) => sum + (Number(stats.wrong) || 0), 0) +
+      entries.filter(([id]) => !state.questionStats[id])
+        .reduce((sum, [, record]) => sum + (Number(record.count) || 1), 0);
+
+    const groups = new Map();
+    entries.forEach(([id, record]) => {
+      const q = QUESTION_MAP[id];
+      const unit = q.unit || '综合练习';
+      const key = `${q.subject}::${unit}`;
+      if (!groups.has(key)) groups.set(key, { subject: q.subject, unit, count: 0, misses: 0, repeated: 0 });
+      const item = groups.get(key);
+      const misses = Math.max(1, Number(record.count) || 0, Number(state.questionStats[id]?.wrong) || 0);
+      item.count++;
+      item.misses += misses;
+      if (misses >= 2) item.repeated++;
+    });
+    const weakUnits = [...groups.values()]
+      .sort((a, b) => b.misses - a.misses || b.count - a.count || a.unit.localeCompare(b.unit, 'zh-CN'))
+      .slice(0, 5);
+    const maxMisses = Math.max(1, ...weakUnits.map(item => item.misses));
+    const subjects = currentSubjects().filter(subject => ui.subject === 'all' || subject.id === ui.subject);
+    const advice = entries.length === 0
+      ? mastered ? '已订正的错题会持续计入掌握记录，可以继续挑战新题保持手感。' : '目前没有待巩固的错题，可以先做单元测试或课程小测。'
+      : repeated ? `优先复习“${SUBJECT_MAP[weakUnits[0].subject]?.name || '学科'} · ${weakUnits[0].unit}”，再进行专项练习；反复出错的题目建议先看解析。`
+        : '先查看错题的上次误选项与解析，再做专项练习，答对后即可从待巩固列表移除。';
+
+    return `<section class="mistake-analysis panel" aria-label="错题分析">
+      <div class="mistake-analysis-heading"><div><h2>📊 错题分析</h2><p>按学科和教材单元找出需要加强的知识点</p></div><span>${ui.subject === 'all' ? '本学期全部学科' : escapeHtml(SUBJECT_MAP[ui.subject]?.name || '当前学科')}</span></div>
+      <div class="mistake-metrics">
+        ${[
+          ['📝', entries.length, '待巩固错题', '尚未答对的不同题目'],
+          ['🔁', repeated, '重复出错', '累计错过至少 2 次'],
+          ['🎯', wrongTotal, '已记录错误', '历次答错次数'],
+          ['✅', mastered, '已攻克错题', '错过后重新答对']
+        ].map(([emoji, value, label, note]) => `<div class="mistake-metric"><span>${emoji}</span><strong>${value}</strong><b>${label}</b><small>${note}</small></div>`).join('')}
+      </div>
+      ${entries.length ? `<div class="mistake-analysis-columns">
+        <div class="mistake-insight-block"><h3>📚 学科分布</h3><p>统计仍需巩固的错题数量</p>
+          <div class="mistake-subject-list">${subjects.map(subject => {
+            const subjectEntries = entries.filter(([id]) => QUESTION_MAP[id].subject === subject.id);
+            const ratio = Math.round(subjectEntries.length / entries.length * 100);
+            return `<div class="mistake-subject-row"><div><strong>${subject.emoji} ${escapeHtml(subject.name)}</strong><span>${subjectEntries.length} 道 · 占比 ${ratio}%</span></div><div class="mistake-track"><span style="width:${ratio}%"></span></div></div>`;
+          }).join('')}</div>
+          <div class="mistake-advice"><strong>💡 巩固建议</strong><p>${escapeHtml(advice)}</p></div>
+        </div>
+        <div class="mistake-insight-block"><h3>🎯 薄弱单元排行</h3><p>按待巩固题目累计错误次数排序，优先练习排在前面的单元</p>
+          <div class="mistake-unit-list">${weakUnits.map(unit => {
+            const lesson = currentLessons().find(item => item.subject === unit.subject && item.unit === unit.unit && item.textbook !== false);
+            return `<div class="mistake-unit-row"><div class="mistake-unit-heading"><strong>${escapeHtml(SUBJECT_MAP[unit.subject]?.name || '学科')} · ${escapeHtml(unit.unit)}</strong><span>${unit.count} 道待巩固 · 累计错 ${unit.misses} 次${unit.repeated ? ` · 反复错 ${unit.repeated} 道` : ''}</span></div>
+              <div class="mistake-track"><span style="width:${Math.round(unit.misses / maxMisses * 100)}%"></span></div>
+              <div class="mistake-unit-actions">
+                <button type="button" data-action="practice-mistake-unit" data-subject="${escapeHtml(unit.subject)}" data-unit="${escapeHtml(unit.unit)}">专项巩固 ${icon('arrow', 14)}</button>
+                ${lesson ? `<button type="button" data-action="review-mistake-lesson" data-lesson="${escapeHtml(lesson.id)}">复习相关课</button>` : ''}
+              </div></div>`;
+          }).join('')}</div>
+        </div>
+      </div>` : `<div class="mistake-analysis-empty">🌟 ${escapeHtml(advice)}</div>`}
+      <p class="mistake-analysis-note">分析只依据本年级、本学期已保存的答题记录。旧版已经答对并移除的错题无法补算，从本次更新后会持续积累已攻克数据。</p>
+    </section>`;
+  }
+
   function renderMistakes() {
-    const all = Object.entries(state.mistakes).filter(([id]) => QUESTION_MAP[id] && QUESTION_MAP[id].grade === state.grade && QUESTION_MAP[id].semester === state.semester);
-    const filtered = all.filter(([id]) => ui.subject === 'all' || QUESTION_MAP[id].subject === ui.subject);
-    return `<div class="mistakes-page fade-in"><div class="page-heading"><div><span class="page-kicker">${gradeName(state.grade)} · ${semesterName(state.semester)} · 错题会变成经验</span><h1>我的错题本<span class="heading-dot">.</span></h1><p>把暂时不会的题目再看一遍，下次一定更有把握！</p></div><div class="heading-sticker">📝</div></div>
+    const all = currentMistakeEntries();
+    const filtered = currentMistakeEntries(ui.subject).sort((a, b) =>
+      Math.max(Number(b[1].count) || 0, Number(state.questionStats[b[0]]?.wrong) || 0) -
+      Math.max(Number(a[1].count) || 0, Number(state.questionStats[a[0]]?.wrong) || 0) ||
+      String(b[1].at || '').localeCompare(String(a[1].at || '')));
+    return `<div class="mistakes-page fade-in"><div class="page-heading"><div><span class="page-kicker">${gradeName(state.grade)} · ${semesterName(state.semester)} · 错题会变成经验</span><h1>错题分析与巩固<span class="heading-dot">.</span></h1><p>按学科和单元找出薄弱知识点，认真订正每一道错题。</p></div><div class="heading-sticker">📝</div></div>
       <div class="mistake-summary"><div class="mistake-summary-icon">💪</div><div><span>正在攻克的知识点</span><h2>${all.length} <small>道错题</small></h2><p>${all.length ? '不要怕犯错，认真订正就是最棒的成长。' : '太棒啦！目前没有待巩固的错题。'}</p></div>${all.length ? `<button class="button primary-button" data-action="start-quiz" data-kind="mistakes">集中练一练 ${icon('arrow', 17)}</button>` : ''}</div>
-      <div class="course-toolbar mistake-toolbar"><div><h2>错题整理</h2><p>答对后，题目会自动从错题本移除</p></div>${subjectFilters()}</div>
-      ${filtered.length ? `<div class="mistake-list">${filtered.map(([id, record], i) => {
+      <div class="course-toolbar mistake-toolbar"><div><h2>学科错题分析</h2><p>切换学科，可查看对应统计、薄弱单元和错题详情</p></div>${subjectFilters()}</div>
+      ${renderMistakeAnalysis(filtered)}
+      <div class="mistake-list-heading"><h2>📝 待订正题目</h2><p>优先查看重复出错的题；在巩固练习中答对后会移出列表</p></div>
+      ${filtered.length ? `<div class="mistake-list">${filtered.map(([id, record]) => {
         const q = QUESTION_MAP[id]; const s = SUBJECT_MAP[q.subject]; const opened = ui.mistakeExpanded.has(id);
-        return `<div class="mistake-card"><div class="mistake-card-top"><span class="question-tag tone-${s.tone}">${s.emoji} ${s.name} · ${escapeHtml(q.lessonTitle)}</span><span class="mistake-count">错过 ${record.count} 次</span></div><h3>${escapeHtml(q.prompt)}</h3><div class="mistake-options">${q.options.map((option, index) => `<span class="${opened && index === q.answer ? 'right-option' : ''}">${'ABCD'[index]}. ${escapeHtml(option)}</span>`).join('')}</div>
-          ${opened ? `<div class="mistake-explanation"><strong>${icon('bulb', 16)} 正确答案：${'ABCD'[q.answer]}</strong><p>${escapeHtml(q.explanation)}</p></div>` : ''}
-          <button class="hint-link mistake-toggle" data-action="toggle-mistake" data-id="${id}">${opened ? '收起解析' : '查看答案与解析'} ${icon('chevronDown', 16)}</button></div>`;
+        const lastChoice = record.selected == null ? null : Number(record.selected);
+        const lastWrongAt = record.at && !Number.isNaN(Date.parse(record.at)) ? dateLabel(record.at, true) : '';
+        return `<div class="mistake-card"><div class="mistake-card-top"><span class="question-tag tone-${s.tone}">${s.emoji} ${s.name} · ${escapeHtml(q.lessonTitle || q.unit || '综合练习')}</span><span class="mistake-count">本轮错过 ${Number(record.count) || 1} 次${lastWrongAt ? ` · ${lastWrongAt}` : ''}</span></div><h3>${escapeHtml(q.prompt)}</h3><div class="mistake-options">${q.options.map((option, index) => `<span class="${opened && index === q.answer ? 'right-option' : ''} ${opened && index === lastChoice && index !== q.answer ? 'wrong-option' : ''}">${'ABCD'[index]}. ${escapeHtml(option)}</span>`).join('')}</div>
+          ${opened ? `<div class="mistake-explanation"><strong>${icon('bulb', 16)} 正确答案：${'ABCD'[q.answer]} · ${escapeHtml(q.options[q.answer])}</strong>
+            ${lastChoice !== null && q.options[lastChoice] !== undefined ? `<p>上次选择：${'ABCD'[lastChoice]} · ${escapeHtml(q.options[lastChoice])}，可以对照正确答案找出差异。</p>` : ''}
+            <p>对应单元：${escapeHtml(q.unit || '综合练习')}</p><p>解题思路：${escapeHtml(q.explanation || '重新阅读对应知识点，再尝试独立作答。')}</p></div>` : ''}
+          <button class="hint-link mistake-toggle" data-action="toggle-mistake" data-id="${escapeHtml(id)}">${opened ? '收起解析' : '查看误选与解析'} ${icon('chevronDown', 16)}</button></div>`;
       }).join('')}</div>` : `<div class="empty-state"><span>${all.length ? '🔎' : '🎉'}</span><h3>${all.length ? '这个学科没有错题' : '错题本干干净净！'}</h3><p>${all.length ? '试试选择其他学科。' : '去挑战几道新题，继续探索新知识吧。'}</p><button class="outline-button" data-nav="quiz">去趣味测试 ${icon('arrow', 16)}</button></div>`}</div>`;
   }
 
@@ -1324,6 +1641,78 @@
     const action = event.target.closest('[data-action]');
     if (!action) return;
     const a = action.dataset.action;
+    if (a === 'open-focus') {
+      if (ui.detail?.id === action.dataset.lesson) openFocusLesson(action.dataset.lesson, true);
+      return;
+    }
+    if (a === 'focus-subject' && ui.page === 'focus') {
+      const subjectId = action.dataset.subject;
+      if (subjectId !== 'all' && !currentSubjects().some(subject => subject.id === subjectId)) return;
+      ui.focus.subject = subjectId;
+      ui.focus.unit = 'all'; ui.focus.lessonId = null; ui.focus.limit = 18;
+      render(); return;
+    }
+    if (a === 'focus-unit' && ui.page === 'focus') {
+      const unit = action.dataset.unit;
+      const allowed = currentLessons().some(lesson => lesson.textbook !== false &&
+        lesson.unit === unit && (ui.focus.subject === 'all' || lesson.subject === ui.focus.subject));
+      if (unit !== 'all' && !allowed) return;
+      ui.focus.unit = unit; ui.focus.lessonId = null; ui.focus.limit = 18;
+      render(); return;
+    }
+    if (a === 'focus-search' && ui.page === 'focus') {
+      ui.focus.query = (document.querySelector('[data-focus-search]')?.value || '').trim();
+      ui.focus.lessonId = null; ui.focus.limit = 18;
+      render(); return;
+    }
+    if (a === 'focus-clear' && ui.page === 'focus') {
+      ui.focus.query = ''; ui.focus.lessonId = null; ui.focus.limit = 18;
+      render(); return;
+    }
+    if (a === 'focus-reset' && ui.page === 'focus') {
+      ui.focus.subject = 'all'; ui.focus.unit = 'all'; ui.focus.query = '';
+      ui.focus.lessonId = null; ui.focus.limit = 18;
+      render(); return;
+    }
+    if (a === 'focus-more' && ui.page === 'focus' && !ui.focus.lessonId) {
+      ui.focus.limit += 18; render(); return;
+    }
+    if (a === 'focus-open' && ui.page === 'focus' && !ui.focus.lessonId) {
+      if (focusListedLessons().some(lesson => lesson.id === action.dataset.lesson)) {
+        openFocusLesson(action.dataset.lesson);
+      }
+      return;
+    }
+    if (a === 'focus-back' && ui.page === 'focus') {
+      ui.focus.lessonId = null;
+      ui.focus.practiceAnswer = false; ui.focus.reviewAnswers = false;
+      render(); window.scrollTo({ top: 0, behavior: 'smooth' }); return;
+    }
+    if (a === 'focus-mark' && ui.page === 'focus') {
+      const lesson = focusLesson(action.dataset.lesson);
+      const index = Number(action.dataset.point);
+      if (!lesson || lesson.id !== ui.focus.lessonId ||
+        !Number.isInteger(index) || index < 0 || index >= lesson.concepts.length) return;
+      const key = focusPointKey(lesson, index);
+      const found = state.focusDone.indexOf(key);
+      if (found >= 0) state.focusDone.splice(found, 1);
+      else state.focusDone.push(key);
+      saveState(); render(); return;
+    }
+    if ((a === 'focus-practice-answer' || a === 'focus-review-answer') &&
+      ui.page === 'focus' && focusLesson(ui.focus.lessonId)) {
+      if (a === 'focus-practice-answer') ui.focus.practiceAnswer = !ui.focus.practiceAnswer;
+      else ui.focus.reviewAnswers = !ui.focus.reviewAnswers;
+      render(); return;
+    }
+    if (ui.page === 'focus' &&
+      ['focus-preview', 'focus-review', 'focus-quiz'].includes(a)) {
+      const lesson = focusLesson(action.dataset.lesson);
+      if (!lesson || lesson.id !== ui.focus.lessonId) return;
+      if (a === 'focus-quiz') startQuiz('lesson', lesson.id);
+      else openLesson(a === 'focus-preview' ? 'preview' : 'review', lesson.id);
+      return;
+    }
     if (a === 'catalog-search') {
       ui.catalog.query = document.querySelector('[data-catalog-search]')?.value || '';
       ui.catalog.lessonId = null; ui.catalog.answersVisible = false;
@@ -1385,6 +1774,12 @@
       const subjectId = action.dataset.id || '';
       startQuiz(kind, subjectId);
     }
+    else if (a === 'practice-mistake-unit') {
+      const subjectId = action.dataset.subject;
+      const unit = action.dataset.unit;
+      if (SUBJECT_MAP[subjectId] && unit) startQuiz('mistakes', `${subjectId}::${unit}`);
+    }
+    else if (a === 'review-mistake-lesson') openLesson('review', action.dataset.lesson);
     else if (a === 'confirm-answer') confirmAnswer();
     else if (a === 'next-question') {
       if (!ui.quiz || !ui.quiz.checked) return;
@@ -1408,9 +1803,20 @@
         ui.catalog.lessonId = null; ui.catalog.answersVisible = false;
         render(); return;
       }
+      if (ui.page === 'focus') {
+        ui.focus.query = event.target.value.trim();
+        ui.focus.lessonId = null; ui.focus.limit = 18;
+        render(); return;
+      }
       ui.search = event.target.value;
       ui.subject = 'all';
       nav('preview'); return;
+    }
+    if (event.target.matches('[data-focus-search]') && event.key === 'Enter') {
+      event.preventDefault();
+      ui.focus.query = event.target.value.trim();
+      ui.focus.lessonId = null; ui.focus.limit = 18;
+      render(); return;
     }
     if (event.target.matches('[data-catalog-search]') && event.key === 'Enter') {
       event.preventDefault();

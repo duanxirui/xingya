@@ -7,9 +7,11 @@ const store = new Map();
 const root = { innerHTML: '' };
 const handlers = {};
 let selectedUnit = '';
+let focusQuery = '';
 const document = {
   getElementById: (id) => id === 'app' ? root : null,
-  querySelector: (selector) => selector.startsWith('[data-exam-unit=') ? { value: selectedUnit } : null,
+  querySelector: (selector) => selector.startsWith('[data-exam-unit=') ? { value: selectedUnit } :
+    selector === '[data-focus-search]' ? { value: focusQuery } : null,
   addEventListener: (eventName, handler) => { handlers[eventName] = handler; }
 };
 const window = { scrollTo: () => {}, scrollY: 0 };
@@ -106,6 +108,7 @@ const archive = {
   tests: [{ grade: 5, semester: 2, kind: 'unit', title: '五年级历史测试', correct: 1, total: 10 }],
   activities: [{ grade: 5, semester: 2, title: '五年级历史活动' }],
   mistakes: { 'historical-question': 1 },
+  focusDone: [archivedLesson.id + '::1'],
   stars: 7, starsByGrade: { 5: 7 }, starsBySemester: { 5: { 2: 7 } }
 };
 store.set('xingya-grade2-learning-v1', JSON.stringify(archive));
@@ -118,6 +121,7 @@ assert(saved().previewDone.includes(archivedLesson.id), '历史高年级预习�
 assert.equal(saved().tests[0].title, '五年级历史测试', '历史高年级成绩丢失');
 assert.equal(saved().activities[0].title, '五年级历史活动', '历史高年级活动丢失');
 assert.equal(saved().mistakes['historical-question'], 1, '历史高年级错题丢失');
+assert(saved().focusDone.includes(archivedLesson.id + '::1'), '历史高年级重点掌握记录丢失');
 assert.equal(saved().starsBySemester[5][2], 7, '历史高年级星星丢失');
 click({ action: 'grade-picker' });
 for (let lockedGrade = 3; lockedGrade <= 6; lockedGrade++) {
@@ -135,8 +139,13 @@ for (let lockedGrade = 3; lockedGrade <= 6; lockedGrade++) {
 }
 click({ catalogOpen: archivedLesson.id });
 assert(!root.innerHTML.includes('核心知识讲解'), '锁定年级课程详情可通过点击打开');
+click({ nav: 'focus' });
+expect('课程划重点', '重点学习入口缺失');
+click({ action: 'focus-open', lesson: archivedLesson.id });
+assert(!root.innerHTML.includes('本课必会知识与方法'), '锁定年级课程重点可通过模拟点击打开');
 let semestersChecked = 0;
 let examsChecked = 0;
+let focusChecked = 0;
 for (let grade = 1; grade <= 2; grade++) {
   click({ grade });
   for (let semester = 1; semester <= 2; semester++) {
@@ -150,6 +159,42 @@ for (let grade = 1; grade <= 2; grade++) {
       assert(data.textbookBooks.some(b => b.grade === grade && b.semester === semester && b.subject === subject));
     }
     const first = active.find(l => l.subject === 'chinese');
+    click({ nav: 'focus' });
+    expect('本学期重点清单', '课程重点清单未打开');
+    expect('data-action="focus-open"', '重点课程入口缺失');
+    click({ action: 'focus-open', lesson: first.id });
+    expect('本课必会知识与方法', '重点详情未打开');
+    expect(first.concepts[0].title, '重点知识标题缺失');
+    const focusKey = first.id + '::0';
+    click({ action: 'focus-mark', lesson: first.id, point: 0 });
+    assert(saved().focusDone.includes(focusKey), '已掌握标记没有保存');
+    click({ action: 'focus-mark', lesson: archivedLesson.id, point: 0 });
+    assert(!saved().focusDone.includes(archivedLesson.id + '::0'), '锁定年级重点被标记');
+    click({ action: 'focus-practice-answer' });
+    expect('参考思路', '重点练习的参考思路未展示');
+    click({ action: 'focus-review-answer' });
+    expect('考前快速回顾', '重点复习问答未展示');
+    click({ action: 'focus-back' });
+    expect('本学期重点清单', '无法返回重点清单');
+    click({ action: 'focus-subject', subject: 'math' });
+    assert(!root.innerHTML.includes('data-action="focus-open" data-lesson="' + first.id + '"'),
+      '按数学学科筛选时出现语文课');
+    const mathFirst = active.find(l => l.subject === 'math');
+    click({ action: 'focus-unit', unit: mathFirst.unit });
+    click({ action: 'focus-open', lesson: mathFirst.id });
+    expect(mathFirst.title, '按单元筛选的重点课程无法打开');
+    click({ action: 'focus-back' });
+    click({ action: 'focus-reset' });
+    focusQuery = first.title;
+    click({ action: 'focus-search' });
+    expect(first.title, '课程重点的关键词搜索失败');
+    focusQuery = '';
+    click({ action: 'focus-clear' });
+    click({ action: 'focus-more' });
+    assert((root.innerHTML.match(/data-action="focus-open"/g) || []).length > 18,
+      '重点课程的查看更多入口无效');
+    focusChecked++;
+
     click({ nav: 'catalog' });
     expect('课程目录', '目录页');
     click({ catalogGrade: grade });
@@ -163,6 +208,10 @@ for (let grade = 1; grade <= 2; grade++) {
     click({ nav: 'preview' });
     click({ openLesson: first.id, mode: 'preview' });
     expect(first.title, '预习页');
+    click({ action: 'open-focus', lesson: first.id });
+    expect('本课必会知识与方法', '从预习页进入重点详情失败');
+    click({ action: 'focus-preview', lesson: first.id });
+    expect(first.title, '无法从重点返回课前预习');
     click({ action: 'next-step' });
     click({ action: 'next-step' });
     click({ action: 'finish-preview', lesson: first.id });
@@ -214,7 +263,9 @@ assert.equal(firstUnit.questionIds.filter(id => secondUnit.questionIds.includes(
 assert.equal(examsChecked - examCountBefore, 4);
 assert.equal(semestersChecked, 4);
 assert.equal(examsChecked, 28);
+assert.equal(focusChecked, 4);
+assert.equal(saved().focusDone.length, 5, '跨年级学期重点掌握标记未保留');
 console.log(JSON.stringify({
   passed: true, books: data.textbookBooks.length, lessons: lessons.length, extraQuestions: data.extraQuestionCount,
-  semestersChecked, examsChecked, storedExams: (saved().tests || []).length
+  semestersChecked, focusChecked, examsChecked, storedExams: (saved().tests || []).length
 }));
